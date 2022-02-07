@@ -1,18 +1,21 @@
 [package]
 name = "drift-liquidator"
 version = "0.1.0"
-edition = "2021"
+edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-solana-client = "*"
-solana-sdk = "*"
-anchor-client = "*"
-anchor-lang = "0.16.2"
-rayon = "1.5.1"
+solana-client = "1.8.0"
+solana-sdk = "1.8.0"
+anchor-client = "0.19.0"
+anchor-lang = "0.19.0"
+rayon = "*"
 bs58 = "*"
-spl-token = "*"
+spl-token = "3.1.1"
 solana-transaction-status = "*"
 hex = "*"
-clearing-house = { git="https://github.com/drift-labs/protocol-v1.git", features=["no-entrypoint", "mainnet-beta"] }
+clearing-house = { git="https://github.com/drift-labs/protocol-v1.git", features=["no-entrypoint", "mainnet-beta"], rev="4dcf965" }
+clap = { version = "3.0.14", features = ["derive"] }
+log = "*"
+env_logger = "*"
