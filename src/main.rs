@@ -2,7 +2,7 @@ use anchor_lang::AccountDeserialize;
 use clap::Parser;
 use clearing_house::{
     controller::funding::settle_funding_payment,
-    math::margin::calculate_margin_ratio,
+    math::margin::{calculate_liquidation_status, LiquidationType},
     state::{
         history::funding_payment::FundingPaymentHistory,
         market::Markets,
@@ -11,9 +11,9 @@ use clearing_house::{
     },
 };
 use log::{debug, info};
-use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator};
+use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator, IntoParallelRefIterator};
 use solana_client::rpc_client::RpcClient;
-use solana_sdk::account::Account;
+use solana_sdk::{account::Account, account_info::{IntoAccountInfo}};
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     instruction::{AccountMeta, Instruction},
@@ -28,7 +28,7 @@ use std::{
     env,
     error::Error,
     fs::File,
-    time::{Duration, Instant},
+    time::{Duration, Instant}, sync::{Mutex},
 };
 
 #[derive(Parser, Debug)]
@@ -128,7 +128,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             data_map.insert(pubkey, account);
         }
 
-        // reload markets and funding payment history
+        // reload markets and funding payment history and oracles
         markets = (
             markets.0,
             Markets::try_deserialize(&mut &*client.get_account_data(&markets.0).unwrap()).unwrap(),
@@ -136,11 +136,25 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let funding_payment_history_data =
             client.get_account_data(&state.1.funding_payment_history)?;
+        
+        let oracle_accounts = Mutex::new(vec![]);
+        markets.1.markets.par_iter().for_each(|market| {
+            oracle_accounts.lock().unwrap().push((market.amm.oracle, client.get_account(&market.amm.oracle).unwrap()));
+        });
 
         // loop over all users
         let min_margin = users
             .par_iter_mut()
             .filter_map(|mut user| -> Option<u128> {
+                // place holder account info
+                let mut oracles = vec![];
+                let oracle_accounts = oracle_accounts.lock().unwrap();
+                let mut cloned_oracle_accounts = oracle_accounts.clone();
+                drop(oracle_accounts);
+                for oracle_account in cloned_oracle_accounts.iter_mut() {
+                    oracles.push(oracle_account.into_account_info());
+                }
+
                 let funding_payment_history = RefCell::new(
                     FundingPaymentHistory::try_deserialize(
                         &mut &*funding_payment_history_data.clone(),
@@ -169,15 +183,18 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .unwrap();
 
                 // Verify that the user is in liquidation territory
-                let (_, _, _, margin_ratio) = calculate_margin_ratio(
+                let liquidation_status = calculate_liquidation_status(
                     &user.1,
                     &user_positions.borrow_mut(),
                     &markets.borrow(),
+                    &oracles,
+                    &state.1.oracle_guard_rails,
+                    slot
                 )
                 .unwrap();
 
                 // is liquidatable
-                if margin_ratio <= state.1.margin_ratio_partial {
+                if liquidation_status.liquidation_type != LiquidationType::NONE {
                     let mut accounts = vec![
                         AccountMeta::new_readonly(state.0, false),
                         AccountMeta::new_readonly(payer.pubkey(), true),
@@ -225,7 +242,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                             .unwrap();
                 }
 
-                Some(margin_ratio)
+                Some(liquidation_status.margin_ratio)
             })
             .min();
         if let Some(min_margin) = min_margin {
