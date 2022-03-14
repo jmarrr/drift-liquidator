@@ -141,6 +141,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         markets.1.markets.par_iter().for_each(|market| {
             oracle_accounts.lock().unwrap().push((market.amm.oracle, client.get_account(&market.amm.oracle).unwrap()));
         });
+        let oracle_accounts = oracle_accounts.into_inner().unwrap();
 
         // loop over all users
         let min_margin = users
@@ -148,9 +149,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             .filter_map(|mut user| -> Option<u128> {
                 // place holder account info
                 let mut oracles = vec![];
-                let oracle_accounts = oracle_accounts.lock().unwrap();
                 let mut cloned_oracle_accounts = oracle_accounts.clone();
-                drop(oracle_accounts);
                 for oracle_account in cloned_oracle_accounts.iter_mut() {
                     oracles.push(oracle_account.into_account_info());
                 }
