@@ -28,7 +28,7 @@ use std::{
     env,
     error::Error,
     fs::File,
-    time::{Duration, Instant}, sync::{Mutex},
+    time::{Duration, Instant}, sync::{Mutex}, thread,
 };
 
 #[derive(Parser, Debug)]
@@ -114,7 +114,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut slot = client.get_slot()?;
     loop {
-        while client.get_slot()? == slot {}
+        while client.get_slot()? == slot {thread::sleep(Duration::from_millis(10))}
         slot = client.get_slot()?;
 
         let start = Instant::now();
