@@ -1,19 +1,27 @@
-use anchor_lang::{AccountDeserialize, ToAccountMetas, InstructionData};
+use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
 use clap::Parser;
 use clearing_house::{
     controller::funding::settle_funding_payment,
-    math::{margin::{calculate_liquidation_status, LiquidationType}, orders::calculate_base_asset_amount_market_can_execute},
+    math::{
+        margin::{calculate_liquidation_status, LiquidationType},
+        orders::{
+            calculate_base_asset_amount_market_can_execute,
+            calculate_base_asset_amount_user_can_execute,
+        },
+    },
     state::{
         history::funding_payment::FundingPaymentHistory,
         market::Markets,
+        order_state::OrderState,
         state::State,
-        user::{User, UserPositions}, order_state::OrderState, user_orders::{UserOrders, OrderStatus},
+        user::{User, UserPositions},
+        user_orders::{OrderStatus, UserOrders},
     },
 };
 use log::{debug, info};
-use rayon::iter::{IntoParallelRefMutIterator, ParallelIterator, IntoParallelRefIterator};
+use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use solana_client::rpc_client::RpcClient;
-use solana_sdk::{account::Account, account_info::{IntoAccountInfo}};
+use solana_sdk::{account::Account, account_info::IntoAccountInfo};
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     instruction::{AccountMeta, Instruction},
@@ -24,11 +32,14 @@ use solana_sdk::{
 };
 use std::{
     cell::RefCell,
+    cmp::min,
     collections::HashMap,
     env,
     error::Error,
     fs::File,
-    time::{Duration, Instant}, sync::{Mutex}, thread,
+    sync::Mutex,
+    thread,
+    time::{Duration, Instant},
 };
 
 #[derive(Parser, Debug)]
@@ -123,7 +134,9 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut slot = client.get_slot()?;
     loop {
-        while client.get_slot()? == slot {thread::sleep(Duration::from_millis(10))}
+        while client.get_slot()? == slot {
+            thread::sleep(Duration::from_millis(10))
+        }
         slot = client.get_slot()?;
         let recent_blockhash = client.get_latest_blockhash()?;
 
@@ -149,7 +162,10 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let oracle_accounts = Mutex::new(vec![]);
         markets.1.markets.par_iter().for_each(|market| {
-            oracle_accounts.lock().unwrap().push((market.amm.oracle, client.get_account(&market.amm.oracle).unwrap()));
+            oracle_accounts.lock().unwrap().push((
+                market.amm.oracle,
+                client.get_account(&market.amm.oracle).unwrap(),
+            ));
         });
         let oracle_accounts = oracle_accounts.into_inner().unwrap();
 
@@ -197,11 +213,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let orders_account = orders_account.unwrap();
 
                     for order in &orders_account.1.orders {
-                        if order.status != OrderStatus::Open {
+                        if order.status != OrderStatus::Open
+                            || order.base_asset_amount_filled == order.base_asset_amount
+                        {
                             continue;
                         }
-                        // if the order can be filled for any amount, send a transaction to fill it
                         let order_market = markets.1.get_market(order.market_index);
+
                         let mut oracle = None;
                         for o in &oracles {
                             if *o.key == order_market.amm.oracle {
@@ -210,14 +228,34 @@ fn main() -> Result<(), Box<dyn Error>> {
                             }
                         }
 
-                        let oracle_price = order_market.amm.get_oracle_price(oracle.unwrap(), slot).unwrap();
-                        let fillable_amount = calculate_base_asset_amount_market_can_execute(
+                        let oracle_price = order_market
+                            .amm
+                            .get_oracle_price(oracle.unwrap(), slot)
+                            .unwrap();
+                        let fillable_amount_user = calculate_base_asset_amount_user_can_execute(
+                            &mut user.1,
+                            &mut user_positions.borrow_mut(),
+                            &mut order.clone(),
+                            &mut markets_account.borrow_mut(),
+                            order.market_index,
+                        );
+                        let fillable_amount_market = calculate_base_asset_amount_market_can_execute(
                             order,
                             order_market,
                             Some(order_market.amm.mark_price().unwrap()),
                             Some(oracle_price.price),
                         );
-                        if fillable_amount.is_ok() && fillable_amount.unwrap() > 0 {
+                        if fillable_amount_user.is_err() || fillable_amount_market.is_err() {
+                            continue;
+                        }
+                        let fillable_amount_user = fillable_amount_user.unwrap();
+                        let fillable_amount_market = fillable_amount_market.unwrap();
+                        let fillable_amount = min(fillable_amount_user, fillable_amount_market);
+
+                        if fillable_amount_user > 0
+                            && fillable_amount_market > 0
+                            && fillable_amount > order_market.amm.minimum_base_asset_trade_size
+                        {
                             let accounts = clearing_house::accounts::FillOrder {
                                 state: state.0,
                                 order_state: state.1.order_state,
@@ -238,12 +276,21 @@ fn main() -> Result<(), Box<dyn Error>> {
                             let crank_instruction = Instruction {
                                 program_id: clearing_house::id(),
                                 accounts: accounts.to_account_metas(None),
-                                data: clearing_house::instruction::FillOrder{order_id: order.order_id}.data()
+                                data: clearing_house::instruction::FillOrder {
+                                    order_id: order.order_id,
+                                }
+                                .data(),
                             };
 
-                            info!(
+                            // for some reason, a lot of invalid txs are generated, just ignore that for now
+                            debug!(
                                 "result: {:?}",
-                                client.send_transaction(&Transaction::new_signed_with_payer(&vec![crank_instruction], Some(&payer.pubkey()), &vec![&payer], recent_blockhash))
+                                client.send_transaction(&Transaction::new_signed_with_payer(
+                                    &vec![crank_instruction],
+                                    Some(&payer.pubkey()),
+                                    &vec![&payer],
+                                    recent_blockhash
+                                ))
                             );
                         }
                     }
@@ -256,9 +303,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                     &markets_account.borrow(),
                     &oracles,
                     &state.1.oracle_guard_rails,
-                    slot
-                )
-                .unwrap();
+                    slot,
+                );
+
+                if liquidation_status.is_err() {
+                    return None;
+                }
+                let liquidation_status = liquidation_status.unwrap();
 
                 // is liquidatable
                 if liquidation_status.liquidation_type != LiquidationType::NONE {
@@ -281,7 +332,8 @@ fn main() -> Result<(), Box<dyn Error>> {
 
                     for position in user_positions.borrow().positions {
                         if position.base_asset_amount != 0 {
-                            let market = markets_account.borrow().markets[position.market_index as usize];
+                            let market =
+                                markets_account.borrow().markets[position.market_index as usize];
                             accounts.push(AccountMeta::new_readonly(market.amm.oracle, false));
                         }
                     }
