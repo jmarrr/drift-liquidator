@@ -1,7 +1,7 @@
 use anchor_lang::{AccountDeserialize, InstructionData, ToAccountMetas};
 use clap::Parser;
 use clearing_house::{
-    controller::funding::settle_funding_payment,
+    controller::{funding::settle_funding_payment, position::PositionDirection},
     math::{
         margin::{calculate_liquidation_status, LiquidationType},
         orders::{
@@ -252,6 +252,25 @@ fn main() -> Result<(), Box<dyn Error>> {
                         let fillable_amount_market = fillable_amount_market.unwrap();
                         let fillable_amount = min(fillable_amount_user, fillable_amount_market);
 
+                        let mut market_position = None;
+                        for market_pos in user_positions.borrow().positions {
+                            if market_pos.market_index == order.market_index {
+                                market_position = Some(market_pos);
+                                break;
+                            }
+                        }
+                        let market_position = market_position.unwrap();
+
+                        let reduce_only = !(market_position.base_asset_amount == 0
+                            || market_position.base_asset_amount > 0
+                                && order.direction == PositionDirection::Long
+                            || market_position.base_asset_amount < 0
+                                && order.direction == PositionDirection::Short);
+
+                        if !reduce_only && order.reduce_only {
+                            continue;
+                        }
+
                         if fillable_amount_user > 0
                             && fillable_amount_market > 0
                             && fillable_amount > order_market.amm.minimum_base_asset_trade_size
@@ -282,8 +301,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                                 .data(),
                             };
 
-                            // for some reason, a lot of invalid txs are generated, just ignore that for now
-                            debug!(
+                            info!(
                                 "result: {:?}",
                                 client.send_transaction(&Transaction::new_signed_with_payer(
                                     &vec![crank_instruction],
