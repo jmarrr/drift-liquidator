@@ -21,7 +21,7 @@ use clearing_house::{
 use log::{debug, info};
 use rayon::iter::{IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator};
 use solana_client::rpc_client::RpcClient;
-use solana_sdk::{account::Account, account_info::IntoAccountInfo};
+use solana_sdk::account_info::IntoAccountInfo;
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     instruction::{AccountMeta, Instruction},
@@ -119,7 +119,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     debug!("state: {:?}", state.0);
     debug!("markets: {:?}", markets.0);
 
-    assert!(liquidator_drift_account != Pubkey::default());
+    // assert!(liquidator_drift_account != Pubkey::default());
     assert!(state.0 != Pubkey::default());
     assert!(markets.0 != Pubkey::default());
     assert!(order_state.0 != Pubkey::default());
@@ -142,15 +142,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let start = Instant::now();
 
-        let mut data_map: HashMap<Pubkey, Account> = HashMap::new();
-
-        let account_data: Vec<(Pubkey, Account)> =
-            client.get_program_accounts(&clearing_house::id()).unwrap();
-        for (pubkey, account) in account_data.into_iter() {
-            assert!(!data_map.contains_key(&pubkey));
-            data_map.insert(pubkey, account);
-        }
-
         // reload markets and funding payment history and oracles
         markets = (
             markets.0,
@@ -164,10 +155,10 @@ fn main() -> Result<(), Box<dyn Error>> {
         markets.1.markets.par_iter().for_each(|market| {
             if market.amm.oracle != Pubkey::default() {
                 let account = client.get_account(&market.amm.oracle).unwrap();
-                oracle_accounts.lock().unwrap().push((
-                    market.amm.oracle,
-                    account,
-                ));
+                oracle_accounts
+                    .lock()
+                    .unwrap()
+                    .push((market.amm.oracle, account));
             }
         });
         let oracle_accounts = oracle_accounts.into_inner().unwrap();
@@ -189,16 +180,16 @@ fn main() -> Result<(), Box<dyn Error>> {
                     )
                     .unwrap(),
                 );
-                let (user_positions_data, user_account_data) = (
-                    data_map.get(&user.1.positions)?.data.clone(),
-                    data_map.get(&user.0)?.data.clone(),
-                );
                 let user_positions = RefCell::new(
-                    UserPositions::try_deserialize(&mut &*user_positions_data).unwrap(),
+                    UserPositions::try_deserialize(
+                        &mut &*client.get_account_data(&user.1.positions).unwrap(),
+                    )
+                    .unwrap(),
                 );
                 let markets_account = RefCell::new(markets.1);
 
-                user.1 = User::try_deserialize(&mut &*user_account_data).unwrap();
+                user.1 = User::try_deserialize(&mut &*client.get_account_data(&user.0).unwrap())
+                    .unwrap();
 
                 // Settle user's funding payments so that collateral is up to date
                 settle_funding_payment(
@@ -362,24 +353,20 @@ fn main() -> Result<(), Box<dyn Error>> {
                     let liquidate_instruction = Instruction {
                         program_id: clearing_house::id(),
                         accounts,
-                        data: hex::decode("dfb3e27d302e274a").unwrap(),
+                        data: clearing_house::instruction::Liquidate {}.data(),
                     };
 
                     let liquidate_transaction = Transaction::new_signed_with_payer(
                         &*vec![liquidate_instruction],
                         Some(&payer.pubkey()),
                         &vec![&payer],
-                        client.get_latest_blockhash().unwrap(),
+                        recent_blockhash,
                     );
                     info!("liquidating: {:?}", user.0,);
                     info!(
                         "result: {:?}",
                         client.send_transaction(&liquidate_transaction)
                     );
-
-                    user.1 =
-                        User::try_deserialize(&mut &*client.get_account_data(&user.0).unwrap())
-                            .unwrap();
                 }
 
                 Some(liquidation_status.margin_ratio)
