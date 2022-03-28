@@ -162,11 +162,13 @@ fn main() -> Result<(), Box<dyn Error>> {
 
         let oracle_accounts = Mutex::new(vec![]);
         markets.1.markets.par_iter().for_each(|market| {
-            let account = client.get_account(&market.amm.oracle).unwrap();
-            oracle_accounts.lock().unwrap().push((
-                market.amm.oracle,
-                account,
-            ));
+            if market.amm.oracle != Pubkey::default() {
+                let account = client.get_account(&market.amm.oracle).unwrap();
+                oracle_accounts.lock().unwrap().push((
+                    market.amm.oracle,
+                    account,
+                ));
+            }
         });
         let oracle_accounts = oracle_accounts.into_inner().unwrap();
 
