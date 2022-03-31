@@ -255,11 +255,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                         }
                         let market_position = market_position.unwrap();
 
+                        // TODO - handle close quote side position or whatever?
                         let reduce_only = !(market_position.base_asset_amount == 0
                             || market_position.base_asset_amount > 0
                                 && order.direction == PositionDirection::Long
                             || market_position.base_asset_amount < 0
-                                && order.direction == PositionDirection::Short);
+                                && order.direction == PositionDirection::Short) &&
+                            market_position.base_asset_amount.unsigned_abs() > fillable_amount ;
 
                         if !reduce_only && order.reduce_only {
                             continue;
