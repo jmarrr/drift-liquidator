@@ -82,7 +82,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut users = Vec::<(Pubkey, User)>::new();
     // keyed by user
-    let mut orders = HashMap::<Pubkey, (Pubkey, UserOrders)>::new();
+    let mut orders = HashMap::<Pubkey, Mutex<(Pubkey, UserOrders)>>::new();
     let mut liquidator_drift_account = Pubkey::default();
     let mut markets = (Pubkey::default(), Markets::default());
     let mut state = (Pubkey::default(), State::default());
@@ -103,7 +103,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             }
             users.push((account.0, user_account));
         } else if let Ok(user_orders_account) = UserOrders::try_deserialize(&mut &*account.1.data) {
-            orders.insert(user_orders_account.user, (account.0, user_orders_account));
+            orders.insert(user_orders_account.user, Mutex::new((account.0, user_orders_account)));
         } else if let Ok(markets_account) = Markets::try_deserialize(&mut &*account.1.data) {
             assert!(markets.0 == Pubkey::default());
             markets = (account.0, markets_account);
@@ -204,7 +204,8 @@ fn main() -> Result<(), Box<dyn Error>> {
                 // crank limit orders
                 let orders_account = orders.get(&user.0);
                 if orders_account.is_some() {
-                    let orders_account = orders_account.unwrap();
+                    let mut orders_account = orders_account.unwrap().lock().unwrap();
+                    orders_account.1 = UserOrders::try_deserialize(&mut &*client.get_account_data(&orders_account.0).unwrap()).unwrap();
 
                     for order in &orders_account.1.orders {
                         if order.status != OrderStatus::Open
